@@ -1,0 +1,23 @@
+name: Daily Fetch Games
+
+on:
+  schedule:
+    - cron: "0 13 * * *"  # Runs daily at 8AM CST
+  workflow_dispatch:
+
+jobs:
+  fetch-games:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+      - name: Install dependencies
+        run: pip install supabase requests
+      - name: Run fetch_games script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python fetch_games.py
