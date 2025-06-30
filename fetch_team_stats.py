@@ -55,7 +55,7 @@ def fetch_and_insert_team_stats():
 
     for _, row in merged_df.iterrows():
         try:
-            supabase.table("team_stats").insert({
+            supabase.table("team_stats").upsert({
                 "id": str(uuid.uuid4()),
                 "team_name": row["team_name"],
                 "era": round(row["era"], 2) if pd.notna(row["era"]) else None,
