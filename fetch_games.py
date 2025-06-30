@@ -1,81 +1,68 @@
 import os
-import uuid
-import datetime
 import requests
+import datetime
 from supabase import create_client
 
-# Supabase setup
-from dotenv import load_dotenv
-load_dotenv(override=False)  # This prevents overwriting GitHub Actions env vars
-
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("Missing Supabase credentials.")
-
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 
 def fetch_espn_games(target_date):
     date_str = target_date.strftime("%Y%m%d")
     url = f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates={date_str}"
     response = requests.get(url)
-    data = response.json()
+    return response.json()
 
+
+def parse_games(json_data):
     games = []
-    for event in data.get("events", []):
-        competition = event["competitions"][0]
-        competitors = competition["competitors"]
+    for event in json_data.get("events", []):
+        competitions = event.get("competitions", [])
+        if not competitions:
+            continue
+
+        comp = competitions[0]
+        competitors = comp.get("competitors", [])
         if len(competitors) != 2:
             continue
 
-        home = next(c for c in competitors if c["homeAway"] == "home")
-        away = next(c for c in competitors if c["homeAway"] == "away")
+        home = next((team for team in competitors if team["homeAway"] == "home"), None)
+        away = next((team for team in competitors if team["homeAway"] == "away"), None)
 
-        # Extract moneyline odds if available
-        home_moneyline = None
-        away_moneyline = None
-        for odds in competition.get("odds", []):
-            if odds.get("details", "").lower().startswith("moneyline"):
-                ml_values = odds.get("moneyLine", {})
-                home_moneyline = ml_values.get(home["id"])
-                away_moneyline = ml_values.get(away["id"])
-                break
+        if not home or not away:
+            continue
 
-        # Fallback parsing from display strings
-        if home_moneyline is None or away_moneyline is None:
-            for odds in competition.get("odds", []):
-                details = odds.get("details", "")
-                if " vs " in details and "ML" in odds.get("label", ""):
-                    try:
-                        splits = details.replace("ML: ", "").split(" vs ")
-                        away_moneyline = int(splits[0])
-                        home_moneyline = int(splits[1])
-                        break
-                    except Exception:
-                        pass
+        odds = comp.get("odds", [{}])[0]
+        moneyline_home = int(odds.get("homeTeamOdds", {}).get("moneyLine", 0))
+        moneyline_away = int(odds.get("awayTeamOdds", {}).get("moneyLine", 0))
 
-        game = {
-            "id": str(uuid.uuid4()),
-            "game_date": target_date.isoformat(),
+        games.append({
+            "game_date": datetime.datetime.fromisoformat(event["date"].replace("Z", "+00:00")).date().isoformat(),
             "home_team": home["team"]["displayName"],
-            "home_team_abbr": home["team"]["abbreviation"],
             "away_team": away["team"]["displayName"],
+            "home_team_abbr": home["team"]["abbreviation"],
             "away_team_abbr": away["team"]["abbreviation"],
-            "espn_game_id": event["id"],
-            "home_moneyline": home_moneyline,
-            "away_moneyline": away_moneyline
-        }
-        games.append(game)
+            "espn_game_id": event.get("id"),
+            "moneyline_home": moneyline_home,
+            "moneyline_away": moneyline_away
+        })
 
     return games
 
+
 def push_to_supabase(games):
-    if not games:
-        return
     supabase.table("games").upsert(games, on_conflict=["game_date", "home_team", "away_team"]).execute()
 
+
 if __name__ == "__main__":
-    today = datetime.date.today()
-    games = fetch_espn_games(today)
-    push_to_supabase(games)
+    target_date = datetime.datetime.today()
+    print(f"🔄 Fetching ESPN game data for {target_date.date()}...")
+    try:
+        json_data = fetch_espn_games(target_date)
+        games = parse_games(json_data)
+        print(f"✅ Parsed {len(games)} games. Uploading to Supabase...")
+        push_to_supabase(games)
+        print("✅ Upload complete.")
+    except Exception as e:
+        print(f"❌ Error: {e}")
