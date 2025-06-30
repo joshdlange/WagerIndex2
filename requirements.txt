@@ -1,0 +1,4 @@
+sportsipy==0.7.0
+httpx
+supabase
+python-dotenv
