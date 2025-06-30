@@ -1,9 +1,9 @@
-name: Daily Fetch + Model Run
+name: run-all
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "0 12 * * *" # Runs every day at 12:00 UTC (7 AM Central)
-  workflow_dispatch: # Manual trigger via GitHub UI
+    - cron: '0 14 * * *'  # Runs every day at 9am CST
 
 jobs:
   run-all:
@@ -11,44 +11,44 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install supabase pybaseball python-dotenv
+          pip install -r requirements.txt
 
       - name: Run fetch_games.py
+        run: python fetch_games.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python fetch_games.py
 
       - name: Run fetch_game_results.py
+        run: python fetch_game_results.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python fetch_game_results.py
 
       - name: Run fetch_pitcher_stats.py
+        run: python fetch_pitcher_stats.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python fetch_pitcher_stats.py
 
       - name: Run fetch_team_stats.py
+        run: python fetch_team_stats.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python fetch_team_stats.py
 
       - name: Run run_model.py
+        run: python run_model.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python run_model.py
