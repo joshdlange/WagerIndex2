@@ -1,89 +1,91 @@
+
 import os
-import datetime
+import requests
 from supabase import create_client
+from datetime import datetime
 from dotenv import load_dotenv
 
-# Load environment variables (for GitHub Actions)
 load_dotenv()
 
+# Supabase setup
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def run_model():
-    print("🧠 Running prediction model...")
+def fetch_today_games():
+    print("🎯 Fetching today's games from ESPN...")
+    today = datetime.today().strftime('%Y%m%d')
+    url = f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates={today}"
+    resp = requests.get(url)
+    data = resp.json()
+    events = data.get("events", [])
+    games = []
 
-    # 1. Get today's games
-    today = datetime.datetime.now().date().isoformat()
-    games_resp = supabase.table("games").select("*").eq("game_date", today).execute()
-    games = games_resp.data or []
+    for event in events:
+        competitions = event.get("competitions", [])
+        if not competitions:
+            continue
+        comp = competitions[0]
+        competitors = comp.get("competitors", [])
+        if len(competitors) != 2:
+            continue
+
+        home = next((team for team in competitors if team["homeAway"] == "home"), None)
+        away = next((team for team in competitors if team["homeAway"] == "away"), None)
+
+        if not home or not away:
+            continue
+
+        game = {
+            "game_date": datetime.fromisoformat(event["date"]).date().isoformat(),
+            "home_team": home["team"]["displayName"],
+            "away_team": away["team"]["displayName"],
+            "home_team_abbr": home["team"]["abbreviation"],
+            "away_team_abbr": away["team"]["abbreviation"],
+            "espn_game_id": event["id"],
+            "home_score": int(home.get("score", 0)),
+            "away_score": int(away.get("score", 0)),
+        }
+
+        # Dummy predicted winner and confidence for now
+        game["predicted_winner"] = game["home_team"] if game["home_score"] > game["away_score"] else game["away_team"]
+        game["score_home"] = game["home_score"]
+        game["score_away"] = game["away_score"]
+        game["confidence_score"] = 0.75  # Placeholder confidence
+        games.append(game)
+
+    return games
+
+def run_model():
+    print("🚀 Running prediction model...")
+    games = fetch_today_games()
     if not games:
         print("⚠️ No games found for today.")
         return
 
-    # 2. Get pitcher stats
-    pitcher_resp = supabase.table("pitchers").select("*").execute()
-    pitcher_stats = {p["id"]: p for p in pitcher_resp.data}
-
-    # 3. Get team stats
-    team_resp = supabase.table("team_stats").select("*").execute()
-    team_stats = {t["team_id"]: t for t in team_resp.data}
-
-    score_diffs = []
-
+    # Identify pick of the day (highest confidence)
+    pick_of_the_day = max(games, key=lambda x: x["confidence_score"])
     for game in games:
-        home_id = game.get("home_team_id")
-        away_id = game.get("away_team_id")
-        home_pitcher_id = game.get("home_pitcher_id")
-        away_pitcher_id = game.get("away_pitcher_id")
+        game["is_pick_of_the_day"] = game == pick_of_the_day
 
-        # Skip if any core data is missing
-        if not all([home_id, away_id, home_pitcher_id, away_pitcher_id]):
-            continue
-
-        home_pitcher = pitcher_stats.get(home_pitcher_id)
-        away_pitcher = pitcher_stats.get(away_pitcher_id)
-        home_team = team_stats.get(home_id)
-        away_team = team_stats.get(away_id)
-
-        if not all([home_pitcher, away_pitcher, home_team, away_team]):
-            continue
-
-        # 4. Example scoring logic
-        home_score = (
-            (5 - home_pitcher["era"])
-            + (5 - home_pitcher["whip"])
-            + home_team["runs"]
-            + home_team["ops"]
-        )
-        away_score = (
-            (5 - away_pitcher["era"])
-            + (5 - away_pitcher["whip"])
-            + away_team["runs"]
-            + away_team["ops"]
-        )
-
-        score_diffs.append({
-            "game_id": game["id"],
-            "home_team": game["home_team"],
+    # Store in Supabase
+    for game in games:
+        pick_data = {
+            "game_date": game["game_date"],
             "away_team": game["away_team"],
-            "home_score": round(home_score, 2),
-            "away_score": round(away_score, 2),
-            "combined_rank": abs(home_score - away_score),  # lower is closer matchup
-            "team": game["home_team"] if home_score > away_score else game["away_team"]
-        })
+            "home_team": game["home_team"],
+            "predicted_winner": game["predicted_winner"],
+            "score_away": game["score_away"],
+            "score_home": game["score_home"],
+            "confidence_score": game["confidence_score"],
+            "is_pick_of_the_day": game.get("is_pick_of_the_day", False)
+        }
 
-    print(f"🔍 Matchups with computed scores: {len(score_diffs)}")
-
-    if not score_diffs:
-        print("❌ No matchups available to score — skipping pick generation.")
-        return
-
-    pick = sorted(score_diffs, key=lambda x: x["combined_rank"])[0]["team"]
-    print(f"✅ Model Pick of the Day: {pick}")
-
-    # Optionally upsert this to a new table
-    # supabase.table("model_picks").upsert({"date": today, "team": pick}).execute()
+        try:
+            supabase.table("daily_picks").upsert(pick_data).execute()
+            print(f"✅ Stored pick: {pick_data['predicted_winner']} in {pick_data['home_team']} vs {pick_data['away_team']}")
+        except Exception as e:
+            print(f"❌ Failed to insert pick: {e}")
 
 if __name__ == "__main__":
     run_model()
