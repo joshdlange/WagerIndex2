@@ -1,62 +1,55 @@
 import os
 import uuid
-from dotenv import load_dotenv
 from supabase import create_client, Client
-from pybaseball import team_batting, team_pitching
-
+from sportsipy.mlb.teams import Teams
 from dotenv import load_dotenv
-load_dotenv(override=False)  # This prevents overwriting GitHub Actions env vars
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("Missing Supabase credentials.")
-
+# Load env vars
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def generate_team_id():
-    return str(uuid.uuid4())
+def fetch_team_stats():
+    results = []
+    for team in Teams():
+        try:
+            data = team.data
+            stats = {
+                "id": str(uuid.uuid4()),
+                "team_name": team.name,
+                "batting_avg": float(data.get("batting_average", 0)),
+                "slugging_pct": float(data.get("slugging_percentage", 0)),
+                "on_base_pct": float(data.get("on_base_percentage", 0)),
+                "runs_per_game": float(data.get("runs_per_game", 0)),
+                "hits_per_game": float(data.get("hits_per_game", 0)),
+                "walks_per_game": float(data.get("walks_per_game", 0)),
+                "strikeouts_per_game": float(data.get("strikeouts_per_game", 0)),
+                "team_era": float(data.get("earned_run_avg", 0)),
+                "team_whip": float(data.get("walks_hits_per_inning_pitched", 0)),
+                "fielding_pct": float(data.get("fielding_percentage", 0)),
+                "errors_per_game": float(data.get("errors_per_game", 0)),
+                # Placeholder values for bullpen stats
+                "bullpen_era": 0.00,
+                "bullpen_whip": 0.00,
+            }
+            results.append(stats)
+        except Exception as e:
+            print(f"⚠️ Error fetching stats for {team.name}: {e}")
+    return results
 
-def merge_team_stats(batting_df, pitching_df):
-    stats = []
-    for _, row in batting_df.iterrows():
-        team = {
-            "team_abbr": row["Team"],
-            "team_name": row["Name"],
-            "batting_avg": row["AVG"],
-            "obp": row["OBP"],
-            "slg": row["SLG"],
-            "ops": row["OPS"],
-            "runs": row["R"],
-            "home_runs": row["HR"],
-            "strikeouts": row["SO"],
-            "walks": row["BB"],
-        }
-        stats.append(team)
+def push_to_supabase(teams):
+    try:
+        supabase.table("team_stats").upsert(teams, on_conflict=["team_name"]).execute()
+        print(f"✅ Uploaded {len(teams)} team stats to Supabase.")
+    except Exception as e:
+        print(f"❌ Supabase upload failed: {e}")
 
-    for stat in stats:
-        pitching_row = pitching_df[pitching_df["Team"] == stat["team_abbr"]]
-        if not pitching_row.empty:
-            row = pitching_row.iloc[0]
-            stat.update({
-                "era": row["ERA"],
-                "whip": row["WHIP"],
-                "k_per_9": row["SO9"],
-                "bb_per_9": row["BB9"],
-                "innings_pitched": row["IP"],
-            })
-        stat["id"] = generate_team_id()
-    return stats
-
-def push_to_supabase(stats):
-    print("📤 Previewing first 3 team stats:")
-    print(stats[:3])
-    response = supabase.table("team_stats").upsert(stats, on_conflict=["team_abbr"]).execute()
-    print("✅ Supabase response:", response)
+def main():
+    teams = fetch_team_stats()
+    if teams:
+        push_to_supabase(teams)
+    else:
+        print("⚠️ No team stats found.")
 
 if __name__ == "__main__":
-    batting_df = team_batting()
-    pitching_df = team_pitching()
-    stats = merge_team_stats(batting_df, pitching_df)
-    push_to_supabase(stats)
+    main()
