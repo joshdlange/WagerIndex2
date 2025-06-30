@@ -5,8 +5,15 @@ import requests
 from supabase import create_client
 
 # Supabase setup
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+from dotenv import load_dotenv
+load_dotenv(override=False)  # This prevents overwriting GitHub Actions env vars
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("Missing Supabase credentials.")
+
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def fetch_espn_games(target_date):
