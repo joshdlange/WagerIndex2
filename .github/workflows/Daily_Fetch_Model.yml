@@ -3,7 +3,7 @@ name: Daily Fetch + Model Run
 on:
   schedule:
     - cron: "0 12 * * *" # Runs every day at 12:00 UTC (7 AM Central)
-  workflow_dispatch: # Allows manual trigger from GitHub UI
+  workflow_dispatch: # Manual trigger via GitHub UI
 
 jobs:
   run-all:
@@ -11,15 +11,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: 3.10
+          python-version: "3.10"
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install supabase pybaseball python-dotenv
 
       - name: Run fetch_games.py
