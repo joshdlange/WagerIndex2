@@ -1,63 +1,64 @@
 import os
-from datetime import datetime, timedelta
+import datetime
 import requests
-from supabase import create_client
-import uuid
-
-# Supabase config (GitHub Actions uses secrets)
+from supabase import create_client, Client
 from dotenv import load_dotenv
-load_dotenv(override=False)  # This prevents overwriting GitHub Actions env vars
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+# Load env vars
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("Missing Supabase credentials.")
-
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-def fetch_espn_game_results(date_str):
+def fetch_espn_results(target_date):
+    date_str = target_date.strftime("%Y%m%d")
     url = f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates={date_str}"
     response = requests.get(url)
-    data = response.json()
+    response.raise_for_status()
+    return response.json().get("events", [])
 
+def extract_results(events):
     results = []
-    for event in data.get("events", []):
+    for event in events:
         try:
-            game_id = event["id"]
-            competitions = event["competitions"][0]
-            competitors = competitions["competitors"]
+            comp = event["competitions"][0]
+            competitors = comp["competitors"]
             home = next(team for team in competitors if team["homeAway"] == "home")
             away = next(team for team in competitors if team["homeAway"] == "away")
 
             home_score = int(home["score"])
             away_score = int(away["score"])
-            winner = home["team"]["abbreviation"] if home_score > away_score else away["team"]["abbreviation"]
+            winner = home["team"]["displayName"] if home["winner"] else away["team"]["displayName"]
 
-            result = {
-                "id": str(uuid.uuid4()),
-                "espn_game_id": game_id,
-                "game_date": date_str,
+            game = {
+                "game_date": datetime.datetime.strptime(event["date"], "%Y-%m-%dT%H:%MZ").date(),
+                "home_team": home["team"]["displayName"],
+                "away_team": away["team"]["displayName"],
                 "home_score": home_score,
                 "away_score": away_score,
-                "winner": winner
+                "winner": winner,
+                "espn_game_id": event["id"]
             }
-            results.append(result)
+            results.append(game)
         except Exception as e:
-            print(f"⚠️ Skipped game due to error: {e}")
-
+            print(f"⚠️ Error parsing game: {e}")
     return results
 
 def push_to_supabase(results):
-    if not results:
-        print("⚠️ No game results to insert.")
-        return
-    response = supabase.table("games").upsert(results, on_conflict=["espn_game_id"]).execute()
-    print("✅ Supabase response:", response)
+    try:
+        supabase.table("games").upsert(results, on_conflict=["game_date", "home_team", "away_team"]).execute()
+        print(f"✅ Uploaded {len(results)} final scores to Supabase.")
+    except Exception as e:
+        print(f"❌ Supabase upload failed: {e}")
+
+def main():
+    today = datetime.date.today()
+    print(f"📊 Fetching MLB results for {today}")
+    events = fetch_espn_results(today)
+    parsed = extract_results(events)
+    if parsed:
+        push_to_supabase(parsed)
+    else:
+        print("⚠️ No results found.")
 
 if __name__ == "__main__":
-    date_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    print(f"📅 Fetching game results for {date_str}")
-    results = fetch_espn_game_results(date_str)
-    print("📤 Previewing first 3 results:", results[:3])
-    push_to_supabase(results)
+    main()
