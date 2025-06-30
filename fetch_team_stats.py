@@ -1,55 +1,46 @@
 import os
-import uuid
-from supabase import create_client, Client
-from sportsipy.mlb.teams import Teams
-from dotenv import load_dotenv
+import datetime
+from supabase import create_client
+from pybaseball import team_batting, team_pitching
+import pandas as pd
 
-# Load env vars
+# Supabase setup
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def fetch_team_stats():
-    results = []
-    for team in Teams():
-        try:
-            data = team.data
-            stats = {
-                "id": str(uuid.uuid4()),
-                "team_name": team.name,
-                "batting_avg": float(data.get("batting_average", 0)),
-                "slugging_pct": float(data.get("slugging_percentage", 0)),
-                "on_base_pct": float(data.get("on_base_percentage", 0)),
-                "runs_per_game": float(data.get("runs_per_game", 0)),
-                "hits_per_game": float(data.get("hits_per_game", 0)),
-                "walks_per_game": float(data.get("walks_per_game", 0)),
-                "strikeouts_per_game": float(data.get("strikeouts_per_game", 0)),
-                "team_era": float(data.get("earned_run_avg", 0)),
-                "team_whip": float(data.get("walks_hits_per_inning_pitched", 0)),
-                "fielding_pct": float(data.get("fielding_percentage", 0)),
-                "errors_per_game": float(data.get("errors_per_game", 0)),
-                # Placeholder values for bullpen stats
-                "bullpen_era": 0.00,
-                "bullpen_whip": 0.00,
-            }
-            results.append(stats)
-        except Exception as e:
-            print(f"⚠️ Error fetching stats for {team.name}: {e}")
-    return results
+# Determine season year
+season_year = datetime.date.today().year
 
-def push_to_supabase(teams):
+# Load team batting & pitching stats
+print(f"📊 Fetching team batting and pitching stats for {season_year}")
+batting_df = team_batting(season_year)
+pitching_df = team_pitching(season_year)
+
+# Merge and clean up
+merged_df = pd.merge(batting_df, pitching_df, on="Team", suffixes=("_bat", "_pitch"))
+
+# Rename and select columns you need — adjust based on your Supabase table schema
+mapped_df = pd.DataFrame({
+    "team_name": merged_df["Team"],
+    "runs_per_game": merged_df["R/G"],
+    "batting_avg": merged_df["AVG_bat"],
+    "on_base_pct": merged_df["OBP_bat"],
+    "slugging_pct": merged_df["SLG_bat"],
+    "ops": merged_df["OPS_bat"],
+    "era": merged_df["ERA_pitch"],
+    "whip": merged_df["WHIP_pitch"],
+    "strikeouts_per_9": merged_df["SO9_pitch"],
+    "walks_per_9": merged_df["BB9_pitch"]
+}).dropna()
+
+# Upload each row to Supabase
+print(f"⬆️ Uploading team stats to Supabase ({len(mapped_df)} teams)")
+for _, row in mapped_df.iterrows():
+    data = row.to_dict()
     try:
-        supabase.table("team_stats").upsert(teams, on_conflict=["team_name"]).execute()
-        print(f"✅ Uploaded {len(teams)} team stats to Supabase.")
+        supabase.table("team_stats").upsert(data).execute()
     except Exception as e:
-        print(f"❌ Supabase upload failed: {e}")
+        print(f"❌ Error inserting team {data['team_name']}: {e}")
 
-def main():
-    teams = fetch_team_stats()
-    if teams:
-        push_to_supabase(teams)
-    else:
-        print("⚠️ No team stats found.")
-
-if __name__ == "__main__":
-    main()
+print("✅ Done syncing team stats.")
