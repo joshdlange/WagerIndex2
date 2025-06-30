@@ -1,55 +1,68 @@
 import os
 import requests
-import uuid
+import pandas as pd
 from supabase import create_client
-from datetime import datetime
 
+# --- Supabase setup ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def fetch_pitchers_stats(year=2024):
-    print(f"🔄 Fetching pitcher data for season {year}")
-    url = f"https://statsapi.mlb.com/api/v1/stats?stats=season&group=pitching&limit=1000&season={year}&sportIds=1"
+# --- Load team abbreviation to team_id mapping from Supabase ---
+def get_team_ids():
+    result = supabase.table("teams").select("id,abbreviation").execute()
+    rows = result.data
+    return {row["abbreviation"]: row["id"] for row in rows}
 
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        data = response.json()
-    except Exception as e:
-        print(f"❌ Error fetching pitcher stats: {e}")
-        return
+# --- Fetch pitcher stats from Sports Reference ---
+def fetch_pitcher_stats():
+    url = "https://www.baseball-reference.com/leagues/MLB/2024-standard-pitching.shtml"
+    tables = pd.read_html(url)
+    df = tables[0]
 
-    stats = data.get("stats", [])
-    if not stats or not stats[0].get("splits"):
-        print("❌ No pitcher stats found.")
-        return
+    # Clean column headers
+    df.columns = df.columns.droplevel() if isinstance(df.columns, pd.MultiIndex) else df.columns
 
-    for player in stats[0]["splits"]:
-        person = player.get("player", {})
-        stat = player.get("stat", {})
-        mlb_id = person.get("id")
-        name = person.get("fullName", "Unknown")
+    df = df[df["Rk"] != "Rk"]  # Remove repeating headers
+    df = df.dropna(subset=["Name"])
 
-        pitcher_record = {
-            "id": str(uuid.uuid4()),
-            "mlb_id": str(mlb_id),
-            "name": name,
-            "team_id": None,  # Will update this if team mapping is handled elsewhere
-            "era": float(stat.get("era", 0.0)),
-            "whip": float(stat.get("whip", 0.0)),
-            "k9": float(stat.get("strikeoutsPer9Inn", 0.0)),
-            "bb9": float(stat.get("baseOnBallsPer9", 0.0)),
-            "innings_pitched": float(stat.get("inningsPitched", 0.0)),
-        }
+    return df
 
-        # UPSERT using mlb_id as unique key if supported
+# --- Format and insert pitcher data ---
+def insert_pitchers(df, team_ids):
+    for _, row in df.iterrows():
         try:
-            supabase.table("pitchers").upsert(pitcher_record, on_conflict="mlb_id").execute()
+            name = row["Name"]
+            team_abbr = row["Tm"]
+
+            if team_abbr not in team_ids or team_abbr == "TOT":
+                continue
+
+            pitcher = {
+                "name": name,
+                "team_id": team_ids[team_abbr],
+                "era": float(row.get("ERA", 0) or 0),
+                "whip": float(row.get("WHIP", 0) or 0),
+                "k9": float(row.get("SO9", 0) or 0),
+                "bb9": float(row.get("BB9", 0) or 0),
+                "innings_pitched": float(row.get("IP", 0) or 0),
+            }
+
+            print(f"Inserting: {pitcher['name']} ({team_abbr})")
+            supabase.table("pitchers").insert(pitcher).execute()
+
         except Exception as e:
-            print(f"❌ Error inserting pitcher {name}: {e}")
+            print(f"❌ Failed to insert {row.get('Name')}: {e}")
 
-    print(f"✅ Finished syncing pitcher stats.")
-
+# --- Run ---
 if __name__ == "__main__":
-    fetch_pitchers_stats()
+    print("🔄 Fetching team ID map...")
+    team_ids = get_team_ids()
+
+    print("📊 Fetching pitcher stats...")
+    df = fetch_pitcher_stats()
+
+    print("📥 Inserting into Supabase...")
+    insert_pitchers(df, team_ids)
+
+    print("✅ Pitcher sync complete.")
