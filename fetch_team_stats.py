@@ -15,72 +15,87 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
+def fetch_espn_stats_by_category(year, category):
+    """
+    Helper function to fetch stats for a specific category (batting, pitching, fielding)
+    from the correct, working ESPN API endpoints.
+    """
+    # These are the real API endpoints used by the ESPN website
+    API_URL = f"https://site.api.espn.com/apis/v2/sports/baseball/mlb/seasons/{year}/types/2/groups/10/stats?lang=en®ion=us&contentorigin=espn"
+    
+    print(f"  -> Fetching {category} stats for {year}...")
+    try:
+        response = requests.get(API_URL)
+        response.raise_for_status()
+        data = response.json()
+        
+        # Find the correct category within the JSON response
+        category_data = next((c for c in data['stats'] if c['name'] == category), None)
+        if not category_data or not category_data.get("stats"):
+            raise ValueError(f"Category '{category}' not found in API response.")
+            
+        # Convert the list of stats into a pandas DataFrame
+        df = pd.DataFrame(category_data["stats"])
+        df['team_id'] = [item['team']['id'] for item in data['teams']]
+        df['team_abbr'] = [item['team']['abbreviation'] for item in data['teams']]
+        return df
+        
+    except Exception as e:
+        print(f"❌ Failed to fetch or parse {category} stats: {e}")
+        return None
+
 def fetch_and_upsert_team_stats():
     """
-    Fetches comprehensive team stats directly from the ESPN API,
-    which is the same source as their public website, ensuring data availability.
+    Fetches team stats by making separate API calls for batting, pitching, and fielding,
+    then merges them into a single, complete dataset.
     """
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("❌ Fatal Error: SUPABASE_URL and SUPABASE_KEY secrets must be set.")
         sys.exit(1)
 
     try:
-        # Use our robust utility to get the correct season year
         SEASON_YEAR = get_current_season_year()
-    except Exception as e:
-        sys.exit(1) # Exit if we can't even get the year
+    except Exception:
+        sys.exit(1)
 
-    # This is the API endpoint that powers the ESPN stats website
-    STATS_API_URL = f"https://site.api.espn.com/apis/v2/sports/baseball/mlb/seasons/{SEASON_YEAR}/types/2/teams?lang=en®ion=us&contentorigin=espn&limit=50"
+    print(f"📊 Fetching comprehensive team stats for {SEASON_YEAR} from ESPN's internal APIs...")
+
+    # Fetch data for all three categories
+    batting_df = fetch_espn_stats_by_category(SEASON_YEAR, 'batting')
+    pitching_df = fetch_espn_stats_by_category(SEASON_YEAR, 'pitching')
+    fielding_df = fetch_espn_stats_by_category(SEASON_YEAR, 'fielding')
+
+    if batting_df is None or pitching_df is None or fielding_df is None:
+        print("❌ Fatal Error: Failed to fetch one or more stat categories. Aborting.")
+        sys.exit(1)
+        
+    # Merge the three dataframes into one
+    print("  -> Merging all stat categories...")
+    # Select key stats from each dataframe to avoid duplicate columns like 'gamesPlayed'
+    batting_essentials = batting_df[['team_id', 'team_abbr', 'gamesPlayed', 'runs', 'hits', 'homeRuns', 'avg', 'strikeouts', 'walks']]
+    pitching_essentials = pitching_df[['team_id', 'earnedRunAverage', 'walksAndHitsPerInningPitched']]
+    fielding_essentials = fielding_df[['team_id', 'errors']]
     
-    print(f"📊 Fetching team stats for the {SEASON_YEAR} season directly from ESPN API...")
+    # Merge on the unique team ID
+    merged_1 = pd.merge(batting_essentials, pitching_essentials, on='team_id', how='inner')
+    final_df = pd.merge(merged_1, fielding_essentials, on='team_id', how='inner')
 
-    try:
-        response = requests.get(STATS_API_URL)
-        response.raise_for_status()
-        data = response.json()
-        
-        if not data.get("items"):
-            print(f"❌ Error: ESPN API returned no team stat items for {SEASON_YEAR}. Aborting.")
-            sys.exit(1)
+    # Rename columns to match our Supabase schema
+    final_df = final_df.rename(columns={
+        'avg': 'batting_average',
+        'strikeouts': 'strikeouts_batting',
+        'walks': 'walks_batting',
+        'earnedRunAverage': 'era',
+        'walksAndHitsPerInningPitched': 'whip'
+    })
 
-        teams_data = data["items"]
-    except Exception as e:
-        print(f"❌ Error fetching or parsing data from ESPN Stats API: {e}")
-        sys.exit(1)
-
-    records = []
-    print("  - Processing each team...")
-    for item in teams_data:
-        team_info = item.get("team", {})
-        stats_map = {s["name"]: s["value"] for s in team_info.get("stats", [])}
-
-        # Create a record for the team, handling potentially missing stats
-        team_record = {
-            "team_abbr": team_info.get("abbreviation"),
-            "team_name": team_info.get("displayName"),
-            "games_played": stats_map.get("gamesPlayed"),
-            "runs": stats_map.get("runs"),
-            "hits": stats_map.get("hits"),
-            "home_runs": stats_map.get("homeRuns"),
-            "batting_average": stats_map.get("avg"),
-            "strikeouts_batting": stats_map.get("strikeouts"),
-            "walks_batting": stats_map.get("walks"),
-            "era": stats_map.get("earnedRunAverage"),
-            "whip": stats_map.get("walksAndHitsPerInningPitched"),
-            "errors": stats_map.get("errors"),
-            "last_updated": datetime.now().isoformat()
-        }
-        records.append(team_record)
-
-    if not records:
-        print("❌ No team records were successfully processed. Aborting Supabase upload.")
-        sys.exit(1)
-        
-    # --- Data Sanitization (Best Practice) ---
-    df = pd.DataFrame(records)
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    final_records = df.where(pd.notnull(df), None).to_dict('records')
+    # Sanitize data to be JSON compliant
+    final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    final_records = final_df.where(pd.notnull(final_df), None).to_dict('records')
+    
+    # Add the last_updated timestamp
+    for record in final_records:
+        record['last_updated'] = datetime.now().isoformat()
 
     print(f"⬆️ Upserting {len(final_records)} teams' complete stats into Supabase...")
     try:
