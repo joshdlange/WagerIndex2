@@ -1,10 +1,11 @@
 # utils.py
 import requests
+from datetime import datetime
 
 def get_current_season_year():
     """
-    Gets the current MLB season year directly from the ESPN API.
-    This is the single source of truth for the season year.
+    Gets the correct, active MLB season year from the ESPN API.
+    It intelligently handles the offseason, where the API points to the next year.
     """
     print(" Hitting ESPN API to get the official current season year...")
     try:
@@ -12,16 +13,23 @@ def get_current_season_year():
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
-        # The 'season' object contains the correct year
-        year = data.get("season", {}).get("year")
-        if year:
-            print(f"  -> Official season year is {year}.")
-            return year
-        # Fallback in case the API structure changes
-        print("  -> Could not find season year in API, falling back to system clock.")
-        from datetime import datetime
-        return datetime.now().year
+        
+        season_data = data.get("season", {})
+        api_year = season_data.get("year")
+        season_type = season_data.get("type") # 1=preseason, 2=regular, 3=postseason, 4=offseason
+
+        if not api_year or not season_type:
+            raise ValueError("API response missing 'year' or 'type' in season object.")
+
+        # THIS IS THE CRITICAL LOGIC
+        if season_type == 4: # 4 indicates Offseason
+            print(f"  -> API reports offseason for year {api_year}. Using previous year for stats.")
+            return api_year - 1
+        else:
+            print(f"  -> API reports active season: {api_year}.")
+            return api_year
+
     except Exception as e:
-        print(f"  -> Failed to get year from ESPN API ({e}), falling back to system clock.")
-        from datetime import datetime
-        return datetime.now().year
+        print(f"  -> Critical failure fetching year from ESPN API ({e}). Aborting.")
+        # We must exit here, as proceeding with the wrong year is catastrophic.
+        raise
