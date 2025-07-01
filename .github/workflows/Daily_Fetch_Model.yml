@@ -24,25 +24,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Fetch Current Season Team Stats
+      - name: 1. Fetch Current Season Team Stats
         run: python fetch_team_stats.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
 
-      - name: Fetch Current Season Pitcher Stats
+      - name: 2. Fetch Current Season Pitcher Stats
+        # This uses the robust pybaseball library
         run: python fetch_pitcher_stats.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           
-      - name: Fetch Today's Games
+      - name: 3. Fetch Today's Games
         run: python fetch_games.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
 
-      - name: Run Prediction Model
+      - name: 4. Run Prediction Model
         run: python run_model.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
