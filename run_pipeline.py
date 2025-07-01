@@ -96,15 +96,16 @@ def step_2_fetch_team_stats(supabase, year, team_map):
             print(f"❌ Fatal Error fetching {category} stats: {e}")
             sys.exit(1)
             
+    # Map the fetched API keys to the EXACT schema columns defined in the SQL script.
     records = []
     for abbr, stats in stats_map.items():
         records.append({
             'team_name': stats.get('team_name'),
             'wins': stats.get('wins'), 'losses': stats.get('losses'),
             'batting_avg': stats.get('avg'), 'obp': stats.get('onBasePct'),
-            'slugging': stats.get('sluggingPct'),
+            'slugging': stats.get('sluggingPct'), 'runs_per_game': stats.get('runsPerGame'),
             'era': stats.get('earnedRunAverage'), 'whip': stats.get('walksAndHitsPerInningPitched'),
-            'fielding_pct': stats.get('fieldingPct'),
+            'fielding_pct': stats.get('fieldingPct'), 'errors_per_game': stats.get('errors'),
             'updated_at': datetime.now().isoformat()
         })
         
@@ -144,27 +145,21 @@ def step_4_fetch_daily_games(supabase):
             comp = event["competitions"][0]
             home = next((c for c in comp["competitors"] if c["homeAway"] == "home"), {})
             away = next((c for c in comp["competitors"] if c["homeAway"] == "away"), {})
-
-            # --- THE FIX: Match the 'games' table schema perfectly ---
-            record = {
-                'game_date': event.get("date", "").split("T")[0],
-                # 'game_id' is the correct column name, not 'espn_game_id'
-                'game_id': event.get("id"),
-                'home_team_abbr': home.get("team", {}).get("abbreviation"),
-                'away_team_abbr': away.get("team", {}).get("abbreviation"),
-                'home_pitcher': home.get("probablePitcher", {}).get("athlete", {}).get("displayName"),
-                'away_pitcher': away.get("probablePitcher", {}).get("athlete", {}).get("displayName")
-            }
-            # Safely get moneyline odds
+            
+            # Match the 'games' table schema perfectly
+            record = {'game_date': event.get("date", "").split("T")[0],
+                      'game_id': event.get("id"),
+                      'home_team_abbr': home.get("team", {}).get("abbreviation"),
+                      'away_team_abbr': away.get("team", {}).get("abbreviation"),
+                      'home_pitcher': home.get("probablePitcher", {}).get("athlete", {}).get("displayName"),
+                      'away_pitcher': away.get("probablePitcher", {}).get("athlete", {}).get("displayName")}
             try:
                 odds = next(o for o in comp.get('odds', []) if 'moneyLine' in o.get('homeTeamOdds', {}))
                 record['home_moneyline'] = odds.get('homeTeamOdds', {}).get('moneyLine')
                 record['away_moneyline'] = odds.get('awayTeamOdds', {}).get('moneyLine')
-            except StopIteration:
-                record['home_moneyline'], record['away_moneyline'] = None, None
+            except StopIteration: record['home_moneyline'], record['away_moneyline'] = None, None
             games_records.append(record)
             
-        # THE FIX: Use the correct conflict column 'game_id'
         upsert_data(supabase, 'games', games_records, 'game_id')
         return pd.DataFrame(games_records)
     except Exception as e:
@@ -174,7 +169,7 @@ def step_4_fetch_daily_games(supabase):
 def step_5_run_model_and_upsert_picks(supabase, games_df, team_stats_df, pitcher_stats_df, team_map):
     print("\n--- 5. Running Prediction Model & Upserting Picks ---")
     if games_df.empty: print("✅ No games scheduled for today. Halting model."); return
-    if team_stats_df.empty: print("❌ Halting model: team_stats data is missing."); sys.exit(1);
+    if team_stats_df.empty or 'batting_avg' not in team_stats_df.columns: print("❌ Halting model: team_stats data is missing or malformed."); sys.exit(1)
     if pitcher_stats_df.empty: print("✅ No pitchers met minimum IP. Halting model."); return
 
     name_to_abbr_map = {info['name']: abbr for abbr, info in team_map.items()}
@@ -215,7 +210,7 @@ def step_5_run_model_and_upsert_picks(supabase, games_df, team_stats_df, pitcher
 
 # --- MAIN WORKFLOW ---
 def main():
-    print("🚀 Starting WagerIndex Daily Pipeline (v6.0 - Final Build)...")
+    print("🚀 Starting WagerIndex Daily Pipeline (v7.0 - Final Build)...")
     supabase = get_supabase_client()
     year = get_current_season_year()
     
