@@ -7,6 +7,8 @@ import numpy as np
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from datetime import datetime
+# THE FIX: The import was aliased incorrectly in a previous version. This is the direct, correct import.
+from pybaseball import pitching_stats
 
 # --- CONFIGURATION ---
 load_dotenv()
@@ -31,7 +33,7 @@ def get_current_season_year():
         season_data = response.get("season", {})
         api_year, season_type = season_data.get("year"), season_data.get("type")
         if not api_year or not season_type: raise ValueError("API response missing 'year' or 'type'.")
-        if season_type == 4: # 4 = Offseason
+        if season_type == 4:
             year = api_year - 1
             print(f"  -> API reports offseason. Using previous year ({year}) for stats.")
             return year
@@ -107,13 +109,14 @@ def step_2_fetch_team_stats(supabase, year, team_map):
             'updated_at': datetime.now().isoformat()
         })
         
-    upsert_data(supabase, 'team_stats', records, 'team_name') # Using team_name as the key, as per schema
+    upsert_data(supabase, 'team_stats', records, 'team_name')
     return pd.DataFrame(records)
 
 def step_3_fetch_pitcher_stats(supabase, year, team_map):
     print(f"\n--- 3. Fetching Pitcher Stats for {year} ---")
     try:
-        pitchers_df = pybaseball_pitching_stats(year)
+        # THE FIX: Call the function by its actual imported name.
+        pitchers_df = pitching_stats(year)
         filtered_df = pitchers_df[pitchers_df['IP'] >= 10].copy()
         
         final_records = []
@@ -149,7 +152,7 @@ def step_4_fetch_daily_games(supabase):
                       'home_pitcher': home.get("probablePitcher", {}).get("athlete", {}).get("displayName"),
                       'away_pitcher': away.get("probablePitcher", {}).get("athlete", {}).get("displayName")}
             try:
-                odds = next(o for o in comp.get('odds', []) if 'moneyLine' in o)
+                odds = next(o for o in comp.get('odds', []) if 'moneyLine' in o.get('homeTeamOdds', {}))
                 record['home_moneyline'] = odds.get('homeTeamOdds', {}).get('moneyLine')
                 record['away_moneyline'] = odds.get('awayTeamOdds', {}).get('moneyLine')
             except StopIteration: record['home_moneyline'], record['away_moneyline'] = None, None
@@ -166,7 +169,6 @@ def step_5_run_model_and_upsert_picks(supabase, games_df, team_stats_df, pitcher
     if team_stats_df.empty: print("❌ Halting model: team_stats data is missing."); return
     if pitcher_stats_df.empty: print("❌ Halting model: pitcher_stats data is missing."); return
 
-    # Invert team map for lookup by name
     name_to_abbr_map = {info['name']: abbr for abbr, info in team_map.items()}
     team_stats_df['team_abbr'] = team_stats_df['team_name'].map(name_to_abbr_map)
 
@@ -205,7 +207,7 @@ def step_5_run_model_and_upsert_picks(supabase, games_df, team_stats_df, pitcher
 
 # --- MAIN WORKFLOW ---
 def main():
-    print("🚀 Starting WagerIndex Daily Pipeline (v5.0 - Final Build)...")
+    print("🚀 Starting WagerIndex Daily Pipeline (v5.1 - Final Build)...")
     supabase = get_supabase_client()
     year = get_current_season_year()
     
