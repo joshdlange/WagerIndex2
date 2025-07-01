@@ -7,7 +7,6 @@ import numpy as np
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from datetime import datetime
-# THE FIX: The import was aliased incorrectly in a previous version. This is the direct, correct import.
 from pybaseball import pitching_stats
 
 # --- CONFIGURATION ---
@@ -115,7 +114,6 @@ def step_2_fetch_team_stats(supabase, year, team_map):
 def step_3_fetch_pitcher_stats(supabase, year, team_map):
     print(f"\n--- 3. Fetching Pitcher Stats for {year} ---")
     try:
-        # THE FIX: Call the function by its actual imported name.
         pitchers_df = pitching_stats(year)
         filtered_df = pitchers_df[pitchers_df['IP'] >= 10].copy()
         
@@ -146,18 +144,28 @@ def step_4_fetch_daily_games(supabase):
             comp = event["competitions"][0]
             home = next((c for c in comp["competitors"] if c["homeAway"] == "home"), {})
             away = next((c for c in comp["competitors"] if c["homeAway"] == "away"), {})
-            record = {'game_date': event.get("date", "").split("T")[0], 'espn_game_id': event.get("id"),
-                      'home_team_abbr': home.get("team", {}).get("abbreviation"),
-                      'away_team_abbr': away.get("team", {}).get("abbreviation"),
-                      'home_pitcher': home.get("probablePitcher", {}).get("athlete", {}).get("displayName"),
-                      'away_pitcher': away.get("probablePitcher", {}).get("athlete", {}).get("displayName")}
+
+            # --- THE FIX: Match the 'games' table schema perfectly ---
+            record = {
+                'game_date': event.get("date", "").split("T")[0],
+                # 'game_id' is the correct column name, not 'espn_game_id'
+                'game_id': event.get("id"),
+                'home_team_abbr': home.get("team", {}).get("abbreviation"),
+                'away_team_abbr': away.get("team", {}).get("abbreviation"),
+                'home_pitcher': home.get("probablePitcher", {}).get("athlete", {}).get("displayName"),
+                'away_pitcher': away.get("probablePitcher", {}).get("athlete", {}).get("displayName")
+            }
+            # Safely get moneyline odds
             try:
                 odds = next(o for o in comp.get('odds', []) if 'moneyLine' in o.get('homeTeamOdds', {}))
                 record['home_moneyline'] = odds.get('homeTeamOdds', {}).get('moneyLine')
                 record['away_moneyline'] = odds.get('awayTeamOdds', {}).get('moneyLine')
-            except StopIteration: record['home_moneyline'], record['away_moneyline'] = None, None
+            except StopIteration:
+                record['home_moneyline'], record['away_moneyline'] = None, None
             games_records.append(record)
-        upsert_data(supabase, 'games', games_records, 'espn_game_id')
+            
+        # THE FIX: Use the correct conflict column 'game_id'
+        upsert_data(supabase, 'games', games_records, 'game_id')
         return pd.DataFrame(games_records)
     except Exception as e:
         print(f"❌ Fatal Error fetching daily games: {e}")
@@ -166,8 +174,8 @@ def step_4_fetch_daily_games(supabase):
 def step_5_run_model_and_upsert_picks(supabase, games_df, team_stats_df, pitcher_stats_df, team_map):
     print("\n--- 5. Running Prediction Model & Upserting Picks ---")
     if games_df.empty: print("✅ No games scheduled for today. Halting model."); return
-    if team_stats_df.empty: print("❌ Halting model: team_stats data is missing."); return
-    if pitcher_stats_df.empty: print("❌ Halting model: pitcher_stats data is missing."); return
+    if team_stats_df.empty: print("❌ Halting model: team_stats data is missing."); sys.exit(1);
+    if pitcher_stats_df.empty: print("✅ No pitchers met minimum IP. Halting model."); return
 
     name_to_abbr_map = {info['name']: abbr for abbr, info in team_map.items()}
     team_stats_df['team_abbr'] = team_stats_df['team_name'].map(name_to_abbr_map)
@@ -183,16 +191,16 @@ def step_5_run_model_and_upsert_picks(supabase, games_df, team_stats_df, pitcher
     predictions = []
     for _, game in games_df.iterrows():
         try:
-            away_team = team_stats_df[team_stats_df['team_abbr'] == game['away_team_abbr']].iloc[0]
-            home_team = team_stats_df[team_stats_df['team_abbr'] == game['home_team_abbr']].iloc[0]
-            away_pitcher = pitcher_stats_df[pitcher_stats_df['name'] == game['away_pitcher']]
-            home_pitcher = pitcher_stats_df[pitcher_stats_df['name'] == game['home_pitcher']]
+            away_team_data = team_stats_df[team_stats_df['team_abbr'] == game['away_team_abbr']].iloc[0]
+            home_team_data = team_stats_df[team_stats_df['team_abbr'] == game['home_team_abbr']].iloc[0]
+            away_pitcher_data = pitcher_stats_df[pitcher_stats_df['name'] == game['away_pitcher']]
+            home_pitcher_data = pitcher_stats_df[pitcher_stats_df['name'] == game['home_pitcher']]
             
-            away_pitching_score = away_pitcher['pitching_score'].iloc[0] if not away_pitcher.empty else league_avg_pitcher_score
-            home_pitching_score = home_pitcher['pitching_score'].iloc[0] if not home_pitcher.empty else league_avg_pitcher_score
+            away_pitching_score = away_pitcher_data['pitching_score'].iloc[0] if not away_pitcher_data.empty else league_avg_pitcher_score
+            home_pitching_score = home_pitcher_data['pitching_score'].iloc[0] if not home_pitcher_data.empty else league_avg_pitcher_score
 
-            away_score = (away_team['batting_score'] * WEIGHTS['batting'] + away_pitching_score * WEIGHTS['pitching'] + away_team['bullpen_score'] * WEIGHTS['bullpen'] + away_team['defense_score'] * WEIGHTS['defense'])
-            home_score = (home_team['batting_score'] * WEIGHTS['batting'] + home_pitching_score * WEIGHTS['pitching'] + home_team['bullpen_score'] * WEIGHTS['bullpen'] + home_team['defense_score'] * WEIGHTS['defense'])
+            away_score = (away_team_data['batting_score'] * WEIGHTS['batting'] + away_pitching_score * WEIGHTS['pitching'] + away_team_data['bullpen_score'] * WEIGHTS['bullpen'] + away_team_data['defense_score'] * WEIGHTS['defense'])
+            home_score = (home_team_data['batting_score'] * WEIGHTS['batting'] + home_pitching_score * WEIGHTS['pitching'] + home_team_data['bullpen_score'] * WEIGHTS['bullpen'] + home_team_data['defense_score'] * WEIGHTS['defense'])
 
             predictions.append({'pick_date': game['game_date'], 'home_team': game['home_team_abbr'],
                                 'away_team': game['away_team_abbr'],
@@ -207,7 +215,7 @@ def step_5_run_model_and_upsert_picks(supabase, games_df, team_stats_df, pitcher
 
 # --- MAIN WORKFLOW ---
 def main():
-    print("🚀 Starting WagerIndex Daily Pipeline (v5.1 - Final Build)...")
+    print("🚀 Starting WagerIndex Daily Pipeline (v6.0 - Final Build)...")
     supabase = get_supabase_client()
     year = get_current_season_year()
     
