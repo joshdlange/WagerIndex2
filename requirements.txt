@@ -1,14 +1,8 @@
-sportsipy==0.6.0
-httpx
-supabase
-python-dotenv
-supabase
-pybaseball
-pandas
 # requirements.txt
 pandas
 requests
-pybaseball
 supabase
 python-dotenv
+pybaseball
 lxml
+beautifulsoup4
