@@ -96,7 +96,6 @@ def step_2_fetch_team_stats(supabase, year, team_map):
             print(f"❌ Fatal Error fetching {category} stats: {e}")
             sys.exit(1)
             
-    # Map the fetched API keys to the EXACT schema columns defined in the SQL script.
     records = []
     for abbr, stats in stats_map.items():
         records.append({
@@ -145,8 +144,6 @@ def step_4_fetch_daily_games(supabase):
             comp = event["competitions"][0]
             home = next((c for c in comp["competitors"] if c["homeAway"] == "home"), {})
             away = next((c for c in comp["competitors"] if c["homeAway"] == "away"), {})
-            
-            # Match the 'games' table schema perfectly
             record = {'game_date': event.get("date", "").split("T")[0],
                       'game_id': event.get("id"),
                       'home_team_abbr': home.get("team", {}).get("abbreviation"),
@@ -196,11 +193,15 @@ def step_5_run_model_and_upsert_picks(supabase, games_df, team_stats_df, pitcher
 
             away_score = (away_team_data['batting_score'] * WEIGHTS['batting'] + away_pitching_score * WEIGHTS['pitching'] + away_team_data['bullpen_score'] * WEIGHTS['bullpen'] + away_team_data['defense_score'] * WEIGHTS['defense'])
             home_score = (home_team_data['batting_score'] * WEIGHTS['batting'] + home_pitching_score * WEIGHTS['pitching'] + home_team_data['bullpen_score'] * WEIGHTS['bullpen'] + home_team_data['defense_score'] * WEIGHTS['defense'])
+            
+            # --- THE FIX: Sanitize the calculated confidence score before saving ---
+            raw_confidence = abs(home_score - away_score)
+            confidence = raw_confidence if np.isfinite(raw_confidence) else 0.0
 
             predictions.append({'pick_date': game['game_date'], 'home_team': game['home_team_abbr'],
                                 'away_team': game['away_team_abbr'],
                                 'predicted_winner': game['home_team_abbr'] if home_score > away_score else game['away_team_abbr'],
-                                'confidence_score': abs(home_score - away_score)})
+                                'confidence_score': confidence})
         except Exception as e: print(f"⚠️ Error processing game {game['away_team_abbr']} vs {game['home_team_abbr']}: {e}")
     
     if predictions:
