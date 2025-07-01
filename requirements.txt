@@ -5,4 +5,10 @@ python-dotenv
 supabase
 pybaseball
 pandas
-
+# requirements.txt
+pandas
+requests
+pybaseball
+supabase
+python-dotenv
+lxml
