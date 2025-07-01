@@ -6,3 +6,4 @@ python-dotenv
 pybaseball
 lxml
 beautifulsoup4
+numpy
