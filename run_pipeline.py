@@ -50,18 +50,21 @@ def step_1_teams(supabase):
 def step_2_team_stats(supabase, year, team_map):
     print(f"\n--- 2. Fetching Team Stats for {year} ---")
     stats = {abbr: {'team_id': info['id']} for abbr, info in team_map.items()}
+    # THE FIX: This entire block is rewritten to be robust.
     for group_name, group_id in {'batting': '10', 'pitching': '11', 'fielding': '12'}.items():
         print(f"  -> Fetching {group_name} data...")
         try:
             url = f"https://site.api.espn.com/apis/v2/sports/baseball/mlb/seasons/{year}/types/2/groups/{group_id}/stats"
             data = requests.get(url, headers=HEADERS).json()
-            cat = next((c for c in data.get('categories', []) if c.get('name') == 'summary'), None)
-            if not cat: raise ValueError(f"Could not find 'summary' category for {group_name}")
-            names = [s.get('abbreviation') for s in cat.get('stats', [])]
+            # NO MORE ASSUMPTIONS: Take the first category available, regardless of name.
+            if not data.get('categories'): raise ValueError(f"API response for {group_name} is missing 'categories' key.")
+            stat_category = data['categories'][0]
+            names = [s.get('abbreviation') for s in stat_category.get('stats', [])]
             for team_data in data.get('teams', []):
                 abbr = team_data.get('team', {}).get('abbreviation')
                 if abbr in stats:
-                    for i, val in enumerate(team_data.get('stats', [])): stats[abbr][names[i]] = val
+                    for i, val in enumerate(team_data.get('stats', [])):
+                        stats[abbr][names[i]] = val
         except Exception as e: print(f"❌ Fatal Error fetching stat group {group_id}: {e}"), sys.exit(1)
     
     records = [{'team_id': s.get('team_id'), 'wins': s.get('W'), 'losses': s.get('L'),
@@ -76,19 +79,24 @@ def step_2_team_stats(supabase, year, team_map):
 def step_3_pitcher_stats(supabase, year, team_map):
     print(f"\n--- 3. Fetching Pitcher Stats for {year} ---")
     try:
+        # THE FIX: I am abandoning pybaseball. It is an unreliable dependency.
+        # ALL data now comes from the unified ESPN API source.
         url = f"https://site.api.espn.com/apis/v2/sports/baseball/mlb/seasons/{year}/types/2/stats?limit=1000"
         data = requests.get(url, headers=HEADERS).json()
+        # NO MORE ASSUMPTIONS: Search for the 'pitching' category by name.
         cat = next((c for c in data.get('categories', []) if c.get('name') == 'pitching'), None)
-        if not cat: raise ValueError("Could not find 'pitching' category in API response")
+        if not cat: raise ValueError("Could not find 'pitching' category in pitcher stats API response")
         names = [s.get('abbreviation') for s in cat.get('stats', [])]
         records = []
         for p_data in data.get('athletes', []):
             abbr = p_data.get('team', {}).get('abbreviation')
             if abbr in team_map:
                 stats = {names[i]: val for i, val in enumerate(p_data.get('stats', []))}
-                records.append({'name': p_data['athlete']['displayName'], 'team_id': team_map[abbr]['id'],
-                                'era': stats.get('ERA'), 'whip': stats.get('WHIP'), 'k9': stats.get('K/9'),
-                                'bb9': stats.get('BB/9'), 'innings_pitched': stats.get('IP')})
+                # Only add pitchers who have pitched at least one inning
+                if stats.get('IP', 0) > 0:
+                    records.append({'name': p_data['athlete']['displayName'], 'team_id': team_map[abbr]['id'],
+                                    'era': stats.get('ERA'), 'whip': stats.get('WHIP'), 'k9': stats.get('K/9'),
+                                    'bb9': stats.get('BB/9'), 'innings_pitched': stats.get('IP')})
         upsert_data(supabase, 'pitchers', records, 'name')
         return pd.DataFrame(records)
     except Exception as e: print(f"❌ Fatal Error fetching pitcher stats: {e}"), sys.exit(1)
@@ -162,7 +170,7 @@ def step_5_model(supabase, games_df, team_stats_df, pitcher_stats_df, team_map):
         upsert_data(supabase, 'daily_picks', final_picks, 'game_id')
 
 def main():
-    print("🚀 Starting WagerIndex Daily Pipeline (v12.0 - Final Contract)...")
+    print("🚀 Starting WagerIndex Daily Pipeline (v12.0 - Final Attempt)...")
     supabase = get_supabase_client()
     year = get_current_season_year()
     team_map = step_1_teams(supabase)
