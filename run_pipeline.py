@@ -49,41 +49,38 @@ def step_1_teams(supabase):
 
 def step_2_team_stats(supabase, year, team_map):
     print(f"\n--- 2. Fetching Team Stats for {year} ---")
-    stats_map = {abbr: {'team_id': info['id']} for abbr, info in team_map.items()}
-    # THE FIX: I manually verified every API key against your schema. This is correct.
-    api_to_db_map = {'wins': 'wins', 'losses': 'losses', 'avg': 'batting_avg', 'onBasePct': 'obp',
-                     'sluggingPct': 'slugging', 'runsPerGame': 'runs_per_game',
-                     'earnedRunAverage': 'era', 'walksAndHitsPerInningPitched': 'whip',
-                     'fieldingPct': 'fielding_pct', 'errors': 'errors_per_game'}
-    for group_id in ['10', '11', '12']: # Batting, Pitching, Fielding
+    stats = {abbr: {'team_id': info['id']} for abbr, info in team_map.items()}
+    for group_name, group_id in {'batting': '10', 'pitching': '11', 'fielding': '12'}.items():
+        print(f"  -> Fetching {group_name} data...")
         try:
             url = f"https://site.api.espn.com/apis/v2/sports/baseball/mlb/seasons/{year}/types/2/groups/{group_id}/stats"
             data = requests.get(url, headers=HEADERS).json()
-            cat = data.get('categories', [{}])[0]; names = [s.get('abbreviation') for s in cat.get('stats', [])]
+            cat = next((c for c in data.get('categories', []) if c.get('name') == 'summary'), None)
+            if not cat: raise ValueError(f"Could not find 'summary' category for {group_name}")
+            names = [s.get('abbreviation') for s in cat.get('stats', [])]
             for team_data in data.get('teams', []):
                 abbr = team_data.get('team', {}).get('abbreviation')
-                if abbr in stats_map:
-                    for i, val in enumerate(team_data.get('stats', [])):
-                        stats_map[abbr][names[i]] = val
+                if abbr in stats:
+                    for i, val in enumerate(team_data.get('stats', [])): stats[abbr][names[i]] = val
         except Exception as e: print(f"❌ Fatal Error fetching stat group {group_id}: {e}"), sys.exit(1)
     
-    records = []
-    for abbr, stats in stats_map.items():
-        record = {'team_id': stats['team_id']}
-        for api_key, db_col in api_to_db_map.items():
-            record[db_col] = stats.get(api_key)
-        record['updated_at'] = datetime.now().isoformat()
-        records.append(record)
+    records = [{'team_id': s.get('team_id'), 'wins': s.get('W'), 'losses': s.get('L'),
+                'batting_avg': s.get('AVG'), 'obp': s.get('OBP'), 'slugging': s.get('SLG'),
+                'runs_per_game': s.get('RPG'), 'era': s.get('ERA'),
+                'whip': s.get('WHIP'), 'fielding_pct': s.get('FPCT'),
+                'errors_per_game': s.get('E'), 'updated_at': datetime.now().isoformat()}
+               for abbr, s in stats.items()]
     upsert_data(supabase, 'team_stats', records, 'team_id')
     return pd.DataFrame([r for r in records if r['team_id'] is not None])
 
 def step_3_pitcher_stats(supabase, year, team_map):
     print(f"\n--- 3. Fetching Pitcher Stats for {year} ---")
     try:
-        # THE FIX: Abandoning pybaseball. Using the unified ESPN API source.
         url = f"https://site.api.espn.com/apis/v2/sports/baseball/mlb/seasons/{year}/types/2/stats?limit=1000"
         data = requests.get(url, headers=HEADERS).json()
-        cat = data.get('categories', [{}])[1]; names = [s.get('abbreviation') for s in cat.get('stats', [])] # Group 1 is Pitching
+        cat = next((c for c in data.get('categories', []) if c.get('name') == 'pitching'), None)
+        if not cat: raise ValueError("Could not find 'pitching' category in API response")
+        names = [s.get('abbreviation') for s in cat.get('stats', [])]
         records = []
         for p_data in data.get('athletes', []):
             abbr = p_data.get('team', {}).get('abbreviation')
@@ -165,7 +162,7 @@ def step_5_model(supabase, games_df, team_stats_df, pitcher_stats_df, team_map):
         upsert_data(supabase, 'daily_picks', final_picks, 'game_id')
 
 def main():
-    print("🚀 Starting WagerIndex Daily Pipeline (v11.0 - Final Contract)...")
+    print("🚀 Starting WagerIndex Daily Pipeline (v12.0 - Final Contract)...")
     supabase = get_supabase_client()
     year = get_current_season_year()
     team_map = step_1_teams(supabase)
