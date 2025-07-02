@@ -10,6 +10,7 @@ load_dotenv()
 SUPABASE_URL, SUPABASE_KEY = os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY")
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'}
 WEIGHTS = {'batting': 0.40, 'pitching': 0.30, 'bullpen': 0.20, 'defense': 0.10}
+MIN_INNINGS_PITCHED = 0.1 # Include all pitchers with any activity
 
 # --- DATABASE & UTILITY FUNCTIONS ---
 def get_supabase_client():
@@ -22,8 +23,9 @@ def get_current_season_year():
         data = requests.get("https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard", timeout=15).json()
         s = data.get("season", {}); year, type = s.get("year"), s.get("type")
         if not year or not type: raise ValueError("API missing year/type")
-        if type == 4: print(f"  -> Offseason. Using previous year ({year - 1})."); return year - 1
-        print(f"  -> Active season: {year}."); return year
+        if type == 4: year -= 1; print(f"  -> Offseason. Using previous year ({year}).")
+        else: print(f"  -> Active season: {year}.")
+        return year
     except Exception as e: print(f"❌ CRITICAL FAILURE fetching year: {e}"), sys.exit(1)
 
 def upsert_data(supabase, table_name, records, conflict_col):
@@ -54,13 +56,11 @@ def step_2_team_stats(supabase, year, team_map):
         try:
             url = f"https://site.api.espn.com/apis/v2/sports/baseball/mlb/seasons/{year}/types/2/groups/{group_id}/stats"
             data = requests.get(url, headers=HEADERS).json()
-            cat = data.get('categories', [{}])[0]
-            names = [s.get('name') for s in cat.get('stats', [])]
+            cat = data.get('categories', [{}])[0]; names = [s.get('name') for s in cat.get('stats', [])]
             for team_data in data.get('teams', []):
                 abbr = team_data.get('team', {}).get('abbreviation')
                 if abbr in stats:
-                    for i, val in enumerate(team_data.get('stats', [])):
-                        stats[abbr][names[i]] = val
+                    for i, val in enumerate(team_data.get('stats', [])): stats[abbr][names[i]] = val
         except Exception as e: print(f"❌ Fatal Error fetching stat group {group_id}: {e}"), sys.exit(1)
     
     records = [{'team_id': s.get('team_id'), 'wins': s.get('wins'), 'losses': s.get('losses'),
@@ -70,12 +70,12 @@ def step_2_team_stats(supabase, year, team_map):
                 'errors_per_game': s.get('errors'), 'updated_at': datetime.now().isoformat()}
                for abbr, s in stats.items()]
     upsert_data(supabase, 'team_stats', records, 'team_id')
-    return pd.DataFrame(records)
+    return pd.DataFrame([r for r in records if r['team_id'] is not None])
 
 def step_3_pitcher_stats(supabase, year, team_map):
     print(f"\n--- 3. Fetching Pitcher Stats for {year} ---")
     try:
-        df = pitching_stats(year) # No IP filter
+        df = pitching_stats(year)
         records = [{'name': r.get('Name'), 'team_id': team_map[r.get('Team')]['id'], 'era': r.get('ERA'),
                     'whip': r.get('WHIP'), 'k9': r.get('K/9'), 'bb9': r.get('BB/9'),
                     'innings_pitched': r.get('IP')} for _, r in df.iterrows() if r.get('Team') in team_map]
@@ -145,7 +145,7 @@ def step_5_model(supabase, games_df, team_stats_df, pitcher_stats_df, team_map):
         picks_df = pd.DataFrame(predictions)
         picks_df['margin_rank'] = picks_df['confidence_score'].rank(ascending=False)
         picks_df['highest_moneyline'] = picks_df[['home_moneyline', 'away_moneyline']].max(axis=1)
-        picks_df['moneyline_rank'] = picks_df['highest_moneyline'].rank(ascending=False)
+        picks_df['moneyline_rank'] = picks_df['highest_moneyline'].rank(ascending=False, na_option='bottom')
         picks_df['avg_rank'] = (picks_df['margin_rank'] + picks_df['moneyline_rank']) / 2
         picks_df['final_rank'] = picks_df['avg_rank'].rank(ascending=True)
         picks_df['is_pick_of_day'] = picks_df['final_rank'] == 1.0
