@@ -8,7 +8,30 @@ from datetime import datetime
 load_dotenv()
 SUPABASE_URL, SUPABASE_KEY = os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY")
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'}
-WEIGHTS = {'batting': 0.40, 'pitching': 0.30, 'bullpen': 0.20, 'defense': 0.10}
+
+# THE SPREADSHEET LOGIC: This is the heart of the model.
+# Each stat has an API key, a DB column, a point value, and a rule for winning.
+STAT_WEIGHTS = {
+    'team_batting': [
+        {'api_key': 'runs', 'db_col': 'runs_scored', 'points': 1.0, 'higher_is_better': True},
+        {'api_key': 'avg', 'db_col': 'batting_avg', 'points': 0.75, 'higher_is_better': True},
+        {'api_key': 'onBasePct', 'db_col': 'obp', 'points': 0.5, 'higher_is_better': True},
+        {'api_key': 'sluggingPct', 'db_col': 'slugging', 'points': 0.5, 'higher_is_better': True},
+    ],
+    'team_pitching': [
+        {'api_key': 'earnedRunAverage', 'db_col': 'era', 'points': 1.0, 'higher_is_better': False},
+        {'api_key': 'walksAndHitsPerInningPitched', 'db_col': 'whip', 'points': 0.75, 'higher_is_better': False},
+    ],
+    'team_fielding': [
+        {'api_key': 'fieldingPct', 'db_col': 'fielding_pct', 'points': 0.5, 'higher_is_better': True},
+    ],
+    'pitcher_stats': [
+        {'api_key': 'ERA', 'db_col': 'era', 'points': 1.0, 'higher_is_better': False},
+        {'api_key': 'WHIP', 'db_col': 'whip', 'points': 0.75, 'higher_is_better': False},
+        {'api_key': 'K/9', 'db_col': 'k_per_9', 'points': 0.5, 'higher_is_better': True},
+        {'api_key': 'BB/9', 'db_col': 'bb_per_9', 'points': 0.5, 'higher_is_better': False},
+    ]
+}
 
 # --- UTILITY & DB FUNCTIONS ---
 def get_supabase_client():
@@ -20,7 +43,7 @@ def get_current_season_year():
     try:
         data = requests.get("https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard", timeout=15).json()
         s = data.get("season", {}); year, type = s.get("year"), s.get("type")
-        if not year or not type: raise ValueError("API response missing 'year' or 'type'")
+        if not year or not type: raise ValueError("API missing year/type")
         if type == 4: year -= 1; print(f"  -> Offseason. Using previous year ({year}).")
         else: print(f"  -> Active season: {year}.")
         return year
@@ -43,222 +66,73 @@ def step_1_teams(supabase):
         data = requests.get(f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/teams", headers=HEADERS).json()
         records = [{'name': t['team']['displayName'], 'abbreviation': t['team']['abbreviation']} for t in data['sports'][0]['leagues'][0]['teams']]
         upsert_data(supabase, 'teams', records, 'abbreviation')
-        db_teams = supabase.table('teams').select('id, abbreviation, name'). Code (Two Scripts Only)
-**Action:** Create these two files.
-
-##### `run_pipeline.py` (The Only Prediction Script)
-This is the new master script. It abandons all previous flawed logic. It uses a single, verified API endpoint for team stats and another for pitcher stats. It does not make assumptions about data structure.
-
-```python
-# run_pipeline.py
-import os, sys, requests, pandas as pd, numpy as np
-from supabase import create_client
-from dotenv import load_dotenv
-from datetime import datetime
-
-# --- CONFIGURATION ---
-load_dotenv()
-SUPABASE_URL, SUPABASE_KEY = os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY")
-HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'}
-WEIGHTS = {'batting': 0.40, 'pitching': 0.30, 'bullpen': 0.20, 'defense': 0.10}
-
-# --- UTILITY & DB FUNCTIONS ---
-def get_supabase_client():
-    if not SUPABASE_URL or not SUPABASE_KEY: print("❌ Fatal: Supabase secrets required."), sys.exit(1)
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
-
-def get_current_season_year():
-    print(" Hitting ESPN API for official season year...")
-    try:
-        data = requests.get("https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard", timeoutexecute().data
+        db_teams = supabase.table('teams').select('id, abbreviation, name').execute().data
         return {t['abbreviation']: {'id': t['id'], 'name': t['name']} for t in db_teams}
     except Exception as e: print(f"❌ Fatal Error in Step 1: {e}"), sys.exit(1)
 
 def step_2_team_stats(supabase, year, team_map):
     print(f"\n--- 2. Fetching Team Stats for {year} ---")
     stats = {abbr: {'team_id': info['id']} for abbr, info in team_map.items()}
-    # THE FIX: This entire block is rewritten to be robust and handle API inconsistencies.
     for group_name, group_id in {'batting': '10', 'pitching': '11', 'fielding': '12'}.items():
-        print(f"  -> Fetching {group_name} data...")
         try:
             url = f"https://site.api.espn.com/apis/v2/sports/baseball/mlb/seasons/{year}/types/2/groups/{group_id}/stats"
             data = requests.get(url, headers=HEADERS).json()
-            
-            # NO MORE ASSUMPTIONS: Check if 'categories' key exists. If not, the stats are at the top level.
-            if 'categories' in data and data['categories']:
-                stat_source = data['categories'][0]
-            else:
-                stat_source = data
-            
+            stat_source = data if 'stats' in data else data.get('categories', [{}])[0]
             names = [s.get('abbreviation') for s in stat_source.get('stats', [])]
-            for team_data in data=15).json()
-        s = data.get("season", {}); year, type = s.get("year"), s.get("type")
-        if not year or not type: raise ValueError("API missing year/type")
-        if type == 4: year -= 1; print(f"  -> Offseason. Using previous year ({year}).")
-        else: print(f"  -> Active season: {year}.")
-        return year
-    except Exception as e: print(f"❌ CRITICAL FAILURE fetching year: {e}"), sys.exit(1)
-
-def upsert_data(supabase, table_name, records, conflict_col):
-    if not records: print(f"✅ INFO: No records to upsert for '{table_name}'."); return
-    print(f"⬆️ Upserting {len(records)} records to '{table_name}'...")
-    try:
-        df = pd.DataFrame(records).replace([np.inf, -np.inf], np.nan)
-        response = supabase.table(table_name).upsert(df.where(pd.get('teams', []):
+            for team_data in data.get('teams', []):
                 abbr = team_data.get('team', {}).get('abbreviation')
                 if abbr in stats:
-                    for i, val in enumerate(team_data.get('stats', [])):
-                        stats[abbr][names[i]] = val
-        except Exception as e: print(f"❌ Fatal Error fetching stat group {group_id}: {e}"), sys.exit(1)
+                    for i, val in enumerate(team_data.get('stats', [])): stats[abbr][names[i]] = val
+        except Exception as e: print(f"❌ Fatal Error fetching {group_name} stats: {e}"), sys.exit(1)
     
-    records = [{'team_id': s.get('team_id'), 'wins': s.get('W'), 'losses': s.get('L'),
-                'batting_avg': s.get('AVG'), 'obp': s.get('OBP'), 'slugging': s.get('SLG'),
-                'runs_per.notnull(df), None).to_dict('records'), on_conflict=conflict_col).execute()
-        if not response.data: raise Exception(getattr(response, 'error', 'Unknown error'))
-        print(f"✅ Success.")
-    except Exception as e: print(f"❌ Supabase upsert for '{table_name}' failed: {e}"), sys.exit(1)
-
-# --- PIPELINE STEPS ---
-def step_1_teams(supabase):
-    print("\n--- 1. Syncing Teams ---")
-_game': s.get('RPG'), 'era': s.get('ERA'),
-                'whip': s.get('WHIP'), 'fielding_pct': s.get('FPCT'),
-                'errors_per_game': s.get('E'), 'updated_at': datetime.now().isoformat()}
-               for abbr    try:
-        data = requests.get(f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/teams", headers=HEADERS).json()
-        , s in stats.items()]
+    records = []
+    all_weighted_stats = STAT_WEIGHTS['team_batting'] + STAT_WEIGHTS['team_pitching'] + STAT_WEIGHTS['team_fielding']
+    for abbr, s in stats.items():
+        record = {'team_id': s['team_id']}
+        for stat_info in all_weighted_stats:
+            record[stat_info['db_col']] = s.get(stat_info['api_key'])
+        record['updated_at'] = datetime.now().isoformat()
+        records.append(record)
     upsert_data(supabase, 'team_stats', records, 'team_id')
-    return pd.DataFrame([r for r in records if r.get('team_idrecords = [{'name': t['team']['displayName'], 'abbreviation': t['team']['abbreviation']} for t')])
+    return pd.DataFrame([r for r in records if r['team_id'] is not None])
 
 def step_3_pitcher_stats(supabase, year, team_map):
-    print( in data['sports'][0]['leagues'][0]['teams']]
-        upsert_data(supabase, 'teams',f"\n--- 3. Fetching Pitcher Stats for {year} ---")
+    print(f"\n--- 3. Fetching Pitcher Stats for {year} ---")
     try:
-        url records, 'abbreviation')
-        db_teams = supabase.table('teams').select('id, abbreviation, = f"https://site.api.espn.com/apis/v2/sports/baseball/ml name').execute().data
-        return {t['abbreviation']: {'id': t['id'], 'name':b/seasons/{year}/types/2/stats?limit=1000"
-        data = t['name']} for t in db_teams}
-    except Exception as e: print(f"❌ Fatal requests.get(url, headers=HEADERS).json()
-        cat = next((c for c in data.get(' Error in Step 1: {e}"), sys.exit(1)
-
-def step_2_team_statscategories', []) if c.get('name') == 'pitching'), None)
-        if not cat: raise(supabase, year, team_map):
-    print(f"\n--- 2. Fetching Team Stats ValueError("Could not find 'pitching' category in API response")
-        names = [s.get('ab for {year} ---")
-    try:
-        # This is the single, unified endpoint for all team stats.
-breviation') for s in cat.get('stats', [])]
-        records = []
-        for p_data in data        url = f"https://site.api.espn.com/apis/v2/sports/baseball.get('athletes', []):
-            abbr = p_data.get('team', {}).get('ab/mlb/seasons/{year}/types/2/teams?limit=100"
-        databreviation')
-            if abbr in team_map:
-                stats = {names[i]: val for i, = requests.get(url, headers=HEADERS).json()
-        
-        records = []
-        for item val in enumerate(p_data.get('stats', []))}
-                if float(stats.get('IP',  in data.get("items", []):
-            team_info = item.get("team", {})
-            0)) > 0:
-                    records.append({'name': p_data['athlete']['displayName'], 'teamabbr = team_info.get("abbreviation")
-            if abbr in team_map:
-                # Create_id': team_map[abbr]['id'],
-                                    'era': stats.get('ERA'), ' a simple dictionary from the stats list for easy lookup
-                stats = {s["name"]: s.get("value",whip': stats.get('WHIP'), 'k9': stats.get('K/9'),
-                                0) for s in team_info.get("stats", [])}
-                records.append({
-                         'bb9': stats.get('BB/9'), 'innings_pitched': stats.get('IP')'team_id': team_map[abbr]['id'], 'wins': stats.get('wins'), 'losses': stats})
-        upsert_data(supabase, 'pitchers', records, 'name')
-        return pd..get('losses'),
-                    'batting_avg': stats.get('avg'), 'obp': statsDataFrame(records)
-    except Exception as e: print(f"❌ Fatal Error fetching pitcher stats: {e.get('onBasePct'),
-                    'slugging': stats.get('sluggingPct'), 'runs_}"), sys.exit(1)
-
-def step_4_games(supabase):
-    print("\n--- 4per_game': stats.get('runsPerGame'),
-                    'era': stats.get('earnedRunAverage. Fetching Today's Games ---")
-    try:
-        data = requests.get("https://site'), 'whip': stats.get('walksAndHitsPerInningPitched'),
-                    'fielding.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard",_pct': stats.get('fieldingPct'), 'errors_per_game': stats.get('errors'), headers=HEADERS).json()
-        records = []
-        for event in data.get("events", []):
-                    'updated_at': datetime.now().isoformat()})
-        
-        upsert_data(
-            comp = event["competitions"][0]
-            home = next((c for c in comp["competsupabase, 'team_stats', records, 'team_id')
-        return pd.DataFrame([r for ritors"] if c["homeAway"] == "home"), {}); away = next((c for c in comp["compet in records if r['team_id'] is not None])
-    except Exception as e: print(f"itors"] if c["homeAway"] == "away"), {})
-            rec = {'game_date': event["❌ Fatal Error fetching team stats: {e}"), sys.exit(1)
-
-def step_3_pitcher_stats(date"].split("T")[0], 'game_id': event["id"],
-                   'home_team_abbr': homesupabase, year, team_map):
-    print(f"\n--- 3. Fetching Pitcher Stats.get("team", {}).get("abbreviation"), 'away_team_abbr': away.get("team for {year} ---")
-    try:
-        url = f"https://site.api.espn", {}).get("abbreviation"),
-                   'home_pitcher': home.get("probablePitcher",.com/apis/v2/sports/baseball/mlb/seasons/{year}/types/2/ {}).get("athlete", {}).get("displayName"), 'away_pitcher': away.get("probablePitchstats?limit=1000"
+        url = f"https://site.api.espn.com/apis/v2/sports/baseball/mlb/seasons/{year}/types/2/stats?limit=1000"
         data = requests.get(url, headers=HEADERS).json()
-er", {}).get("athlete", {}).get("displayName")}
-            try:
-                odds = next(        cat = next((c for c in data.get('categories', []) if c.get('name') ==o for o in comp.get('odds', []) if 'moneyLine' in o.get('homeTeamOdds 'pitching'), None)
-        if not cat: raise ValueError("Could not find 'pitching' category in', {}))
-                rec['home_moneyline'], rec['away_moneyline'] = odds.get(' pitcher stats API response")
-        names = [s.get('abbreviation') for s in cat.get('statshomeTeamOdds',{}), odds.get('awayTeamOdds',{})
-            except StopIteration: rec['home_moneyline'], rec['away_moneyline'] = None, None
-            records.append(rec)
-        upsert_data(', [])]
+        cat = next((c for c in data.get('categories', []) if c.get('name') == 'pitching'), None)
+        if not cat: raise ValueError("Could not find 'pitching' category")
+        names = [s.get('abbreviation') for s in cat.get('stats', [])]
         records = []
         for p_data in data.get('athletes', []):
-            abbrsupabase, 'games', records, 'game_id')
-        return pd.DataFrame(records)
-    except = p_data.get('team', {}).get('abbreviation')
-            if abbr in team_map Exception as e: print(f"❌ Fatal Error fetching daily games: {e}"), sys.exit(1):
-                stats = {names[i]: val for i, val in enumerate(p_data.get('stats', []
-
-def step_5_model(supabase, games_df, team_stats_df, pitcher_stats_df))}
+            abbr = p_data.get('team', {}).get('abbreviation')
+            if abbr in team_map:
+                stats = {names[i]: val for i, val in enumerate(p_data.get('stats', []))}
+                # Only include pitchers with innings pitched
                 if float(stats.get('IP', 0)) > 0:
-                    records.append({', team_map):
-    print("\n--- 5. Running Prediction Model & Upserting Picks ---")name': p_data['athlete']['displayName'], 'team_id': team_map[abbr]['id'],
-
-    if games_df.empty: print("✅ No games scheduled."); return
-    if team_stats_                                    'era': stats.get('ERA'), 'whip': stats.get('WHIP'), 'kdf.empty or pitcher_stats_df.empty: print("❌ Halting: Missing stats data."); sys.9': stats.get('K/9'),
-                                    'bb9': stats.get('BB/9exit(1)
-
-    abbr_to_id_map = {abbr: info['id'] for abbr,'), 'innings_pitched': stats.get('IP')})
+                    records.append({'name': p_data['athlete']['displayName'], 'team_id': team_map[abbr]['id'],
+                                    'era': stats.get('ERA'), 'whip': stats.get('WHIP'),
+                                    'k_per_9': stats.get('K/9'), 'bb_per_9': stats.get('BB/9'),
+                                    'innings_pitched': stats.get('IP')})
         upsert_data(supabase, 'pitchers', records, 'name')
         return pd.DataFrame(records)
-    except Exception as e: print info in team_map.items()}
-    def norm(s, asc=True): return s.rank(method='max', ascending=asc, pct=True) * 100
-    
-    team_stats_df['batting_score'] = norm(team_stats_df['batting_avg'])
-    (f"❌ Fatal Error fetching pitcher stats: {e}"), sys.exit(1)
+    except Exception as e: print(f"❌ Fatal Error fetching pitcher stats: {e}"), sys.exit(1)
 
 def step_4_games(supabase):
-    # This function is correct and remains unchanged.
     print("\n--- 4. Fetching Today's Games ---")
     try:
-        data = requests.get("https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard",team_stats_df['defense_score'] = norm(team_stats_df['fielding_pct'])
-    team_stats_df['bullpen_score'] = norm(team_stats_df['era'], asc=False)
-    pitcher_stats_df['pitching_score'] = (norm(pitcher_stats_df['era'], asc=False) + norm(pitcher_stats_df['whip'], asc=False)) / 2
-    avg_pitcher_score = pitcher_stats_df['pitching_score'].mean headers=HEADERS).json()
+        data = requests.get("https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard", headers=HEADERS).json()
         records = []
         for event in data.get("events", []):
             comp = event["competitions"][0]
             home = next((c for c in comp["competitors"] if c["homeAway"] == "home"), {}); away = next((c for c in comp["competitors"] if c["homeAway"] == "away"), {})
             rec = {'game_date': event["date"].split("T")[0], 'game_id': event["id"],
                    'home_team_abbr': home.get("team", {}).get("abbreviation"), 'away_team_abbr': away.get("team", {}).get("abbreviation"),
-                   'home_pitcher': home.get("probablePitcher",()
-
-    predictions = []
-    for _, game in games_df.iterrows():
-        try:
-            home_id, away_id = abbr_to_id_map.get(game['home_team_abbr']), abbr_to_id_map.get(game['away_team_abbr'])
-            home_stats, away_stats = team_stats_df[team_stats_df['team_id'] == home_id].iloc[0], team_stats_df[team_stats_df['team_id'] == away_id].iloc[0]
-            home_p, away_p = pitcher_stats_df[pitcher_stats_df['name'] == game['home_pitcher']], pitcher_stats_df[pitcher_stats_df['name'] == game['away_pitcher']]
-            home_p_score = home_p['pitching_score'].iloc[0] if not home_p.empty else avg_pitcher_score {}).get("athlete", {}).get("displayName"), 'away_pitcher': away.get("probablePitcher", {}).get("athlete", {}).get("displayName")}
+                   'home_pitcher': home.get("probablePitcher", {}).get("athlete", {}).get("displayName"), 'away_pitcher': away.get("probablePitcher", {}).get("athlete", {}).get("displayName")}
             try:
                 odds = next(o for o in comp.get('odds', []) if 'moneyLine' in o.get('homeTeamOdds', {}))
-                rec['home_moneyline'], rec['away_moneyline'] = odds['homeTeamOdds'].get('moneyLine'), odds['awayTeamOdds'].get('moneyLine')
+                rec['home_moneyline'], rec['away_moneyline'] = odds.get('homeTeamOdds',{}).get('moneyLine'), odds.get('awayTeamOdds',{}).get('moneyLine')
             except StopIteration: rec['home_moneyline'], rec['away_moneyline'] = None, None
             records.append(rec)
         upsert_data(supabase, 'games', records, 'game_id')
@@ -266,59 +140,73 @@ def step_4_games(supabase):
     except Exception as e: print(f"❌ Fatal Error fetching daily games: {e}"), sys.exit(1)
 
 def step_5_model(supabase, games_df, team_stats_df, pitcher_stats_df, team_map):
-    # This function is correct and remains unchanged.
-    print("\n--- 5. Running Prediction Model & Upserting Picks ---")
-    if games_df.empty:
-            away_p_score = away_p['pitching_score'].iloc[0] if not away_p.empty else avg_pitcher_score
-
-            home_w_score = (home_stats['batting_score'] * WEIGHTS['batting'] + home_p_score * WEIGHTS['pitching'] + home_stats['bullpen_score'] * WEIGHTS['bullpen'] + home_stats['defense_score'] * WEIGHTS['defense'])
-            away_w_score = (away_stats['batting_score'] * WEIGHTS['batting'] + away_p_score * WEIGHTS['pitching'] + away_stats['bullpen_score'] * WEIGHTS['bullpen'] + away_stats['defense_score'] * WEIGHTS['defense'])
-            
-            predictions.append({'game_id': game['game_id'], 'pick_date': game['game_date'],
-                                'home_team': game['home_team_abbr'], 'away_team': game['away_team_abbr'],
-                                'predicted_home_score': round(home_w_score / 10, 2), 'predicted_away_score': round(away_w_score / 10, 2),
-                                'predicted_winner': game['home_team_abbr'] if home_w_score > away_w_score else game['away_team_abbr'],
-                                'confidence_score': abs(home_w_score - away_w_score),
-                                'home_moneyline': game['home_moneyline'], 'away_moneyline': game['away_moneyline']})
-        except Exception as e: print(f"⚠️ Error processing game {game['away_team_abbr']} vs {game['home_team_abbr']}: {e}")
-    
-    if predictions:
-        picks_df = pd. print("✅ No games scheduled."); return
-    if team_stats_df.empty or pitcher_stats_df.empty: print("❌ Halting: Missing stats data."); sys.exit(1)
+    print("\n--- 5. Running Spreadsheet Logic ---")
+    if games_df.empty: print("✅ No games scheduled."); return
+    if team_stats_df.empty or pitcher_stats_df.empty: print("❌ Halting: Missing stats data."), sys.exit(1)
 
     abbr_to_id_map = {abbr: info['id'] for abbr, info in team_map.items()}
-    def norm(s, asc=True): return s.rank(method='max', ascending=asc, pct=True) * 100
-    
-    team_stats_df['batting_score'] = norm(team_stats_df['batting_avg'])
-    team_stats_df['defense_score'] = norm(team_stats_df['fielding_pct'])
-    team_stats_df['bullpen_score'] = norm(team_stats_df['era'], asc=False)
-    pitcher_stats_df['pitching_score'] = (norm(pitcher_stats_df['era'], asc=False) + norm(pitcher_stats_df['whip'], asc=False)) / 2
-    avg_pitcher_score = pitcher_stats_df['pitching_score'].mean()
-
     predictions = []
+
     for _, game in games_df.iterrows():
         try:
             home_id, away_id = abbr_to_id_map.get(game['home_team_abbr']), abbr_to_id_map.get(game['away_team_abbr'])
-            home_stats, away_stats = team_stats_df[team_stats_df['team_id'] == home_id].iloc[0], team_stats_df[team_stats_df['team_id'] == away_id].iloc[0]
-            home_p, away_p = pitcher_stats_df[pitcher_stats_df['name'] == game['home_pitcher']], pitcher_stats_df[pitcher_stats_df['name'] == game['away_pitcher']]
-            home_p_score = home_p['pitching_score'].iloc[0] if not home_p.empty else avg_pitcher_score
-            away_p_score = away_p['pitching_score'].iloc[0] if not away_p.empty else avg_pitcher_score
+            home_team_stats, away_team_stats = team_stats_df[team_stats_df['team_id'] == home_id].iloc[0], team_stats_df[team_stats_df['team_id'] == away_id].iloc[0]
+            home_pitcher, away_pitcher = pitcher_stats_df[pitcher_stats_df['name'] == game['home_pitcher']], pitcher_stats_df[pitcher_stats_df['name'] == game['away_pitcher']]
+            
+            home_points, away_points = 0.0, 0.0
 
-            home_w_score = (home_stats['batting_score'] * WEIGHTS['batting'] + home_p_score * WEIGHTS['pitching'] + home_stats['bullpen_DataFrame(predictions)
-        picks_df['margin_rank'] = picks_df['confidence_score'].rank(ascending=False)
-        picks_df['highest_moneyline'] = pd.to_numeric(picks_df['home_moneyline'], errors='coerce').fillna(0)
-        away_ml = pd.to_numeric(picks_df['away_moneyline'], errors='coerce').fillna(0)
-        picks_df['highest_moneyline'] = picks_df['highest_moneyline'].combine(away_ml, max)
-        picks_df['moneyline_rank'] = picks_df['highest_moneyline'].rank(ascending=False)
-        picks_df['avg_rank'] = (picks_df['margin_rank'] + picks_df['moneyline_rank']) / 2
-        picks_df['final_rank'] = picks_df['avg_rank'].rank(ascending=True)
-        picks_df['is_pick_of_day'] = picks_df['final_rank'] == 1.0
+            # Team Head-to-Head Comparisons
+            for category in ['team_batting', 'team_pitching', 'team_fielding']:
+                for stat_info in STAT_WEIGHTS[category]:
+                    db_col = stat_info['db_col']
+                    home_val, away_val = home_team_stats.get(db_col, 0), away_team_stats.get(db_col, 0)
+                    if home_val is None or away_val is None: continue
+                    
+                    if stat_info['higher_is_better']:
+                        if home_val > away_val: home_points += stat_info['points']
+                        elif away_val > home_val: away_points += stat_info['points']
+                    else: # Lower is better
+                        if home_val < away_val: home_points += stat_info['points']
+                        elif away_val < home_val: away_points += stat_info['points']
+
+            # Pitcher Head-to-Head Comparisons
+            if not home_pitcher.empty and not away_pitcher.empty:
+                home_p_stats, away_p_stats = home_pitcher.iloc[0], away_pitcher.iloc[0]
+                for stat_info in STAT_WEIGHTS['pitcher_stats']:
+                    db_col = stat_info['db_col']
+                    home_val, away_val = home_p_stats.get(db_col, 0), away_p_stats.get(db_col, 0)
+                    if home_val is None or away_val is None: continue
+
+                    if stat_info['higher_is_better']:
+                        if home_val > away_val: home_points += stat_info['points']
+                        elif away_val > home_val: away_points += stat_info['points']
+                    else: # Lower is better
+                        if home_val < away_val: home_points += stat_info['points']
+                        elif away_val < home_val: away_points += stat_info['points']
+
+            # Final Score Calculation
+            predicted_home_score = round(home_points / 10, 2)
+            predicted_away_score = round(away_points / 10, 2)
+
+            predictions.append({'game_id': game['game_id'], 'pick_date': game['game_date'],
+                                'home_team': game['home_team_abbr'], 'away_team': game['away_team_abbr'],
+                                'predicted_home_score': predicted_home_score, 'predicted_away_score': predicted_away_score,
+                                'predicted_winner': game['home_team_abbr'] if predicted_home_score > predicted_away_score else game['away_team_abbr'],
+                                'confidence_score': abs(predicted_home_score - predicted_away_score)})
+        except Exception as e: print(f"⚠️ Error processing game {game['away_team_abbr']} vs {game['home_team_abbr']}: {e}")
+    
+    if predictions:
+        picks_df = pd.DataFrame(predictions)
+        # Placeholder for Pick of the Day logic, focusing on correct score generation first.
+        picks_df['is_pick_of_day'] = False
+        if not picks_df.empty:
+            top_pick_index = picks_df['confidence_score'].idxmax()
+            picks_df.loc[top_pick_index, 'is_pick_of_day'] = True
         
-        final_picks = picks_df[['game_id', 'pick_date', 'home_team', 'away_team', 'predicted_winner', 'confidence_score', 'is_pick_of_day', 'predicted_home_score', 'predicted_away_score']].to_dict('records')
-        upsert_data(supabase, 'daily_picks', final_picks, 'game_id')
+        upsert_data(supabase, 'daily_picks', picks_df.to_dict('records'), 'game_id')
 
 def main():
-    print("🚀 Starting WagerIndex Daily Pipeline (v13.0 - The Apology)...")
+    print("🚀 Starting WagerIndex Daily Pipeline (The Final Build)...")
     supabase = get_supabase_client()
     year = get_current_season_year()
     team_map = step_1_teams(supabase)
